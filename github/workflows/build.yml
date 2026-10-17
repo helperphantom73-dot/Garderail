@@ -1,0 +1,62 @@
+name: Build ESP32 firmware
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - "gadrail/**"
+      - ".github/workflows/build.yml"
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: arduino/setup-arduino-cli@v2
+
+      - name: Install ESP32 core and library
+        run: |
+          URL=https://espressif.github.io/arduino-esp32/package_esp32_index.json
+          arduino-cli core update-index --additional-urls $URL
+          arduino-cli core install esp32:esp32 --additional-urls $URL
+          arduino-cli lib install ESP32Servo
+
+      - name: Compile
+        run: |
+          arduino-cli compile \
+            --fqbn esp32:esp32:esp32:FlashMode=dio,FlashFreq=40,FlashSize=4M,PartitionScheme=default \
+            --output-dir build gadrail
+          ls -l build
+
+      - name: Collect files and build merged image
+        run: |
+          pip install "esptool==4.8.1"
+          mkdir out
+          cp build/gadrail.ino.bootloader.bin out/bootloader.bin
+          cp build/gadrail.ino.partitions.bin out/partitions.bin
+          cp build/gadrail.ino.bin out/firmware.bin
+          cp "$(find ~/.arduino15 -name boot_app0.bin | head -n 1)" out/boot_app0.bin
+          cd out
+          esptool.py --chip esp32 merge_bin -o merged_4MB.bin \
+            --flash_mode dio --flash_freq 40m --flash_size 4MB \
+            --pad-to-size 4MB \
+            0x1000 bootloader.bin 0x8000 partitions.bin \
+            0xe000 boot_app0.bin 0x10000 firmware.bin
+          esptool.py image_info --chip esp32 firmware.bin
+
+      - name: Verify
+        run: |
+          python3 - <<'EOF'
+          d = open("out/merged_4MB.bin", "rb").read()
+          assert len(d) == 4194304, len(d)
+          assert d[0x1000] == 0xE9, "bootloader magic"
+          assert d[0x8000:0x8002] == b"\xaa\x50", "partition table magic"
+          assert d[0x10000] == 0xE9, "app magic"
+          print("merged image OK")
+          EOF
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: gadrail_esp32_release
+          path: out/
